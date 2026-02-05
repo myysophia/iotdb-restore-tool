@@ -1,0 +1,45 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: iotdb-restore-config
+  namespace: iotdb
+data:
+  config.yaml: |
+    kubernetes:
+      namespace: iotdb
+      pod_name: iotdb-datanode-0
+      kubeconfig: /root/.kube/config
+      context: ""
+
+    iotdb:
+      data_dir: /iotdb/data
+      cli_path: /iotdb/sbin/start-cli.sh
+      host: iotdb-datanode
+      port: 6667
+      username: root
+      password: root
+
+    backup:
+      base_url: https://iotdb-backup.oss-accelerate.aliyuncs.com/ems-au
+      download_dir: /tmp
+      auto_detect_timestamp: true
+      timestamp_pattern: "200601021504"
+
+    import:
+      concurrency: 1
+      batch_size: 3
+      retry_count: 3
+      batch_delay: 3
+      batch_pause: true
+
+    notification:
+      wechat:
+        webhook_url: https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=2785e74d-e41c-475f-b8ac-a8643aa36000
+        enabled: true
+      environment: EMS-AU
+      enabled: true
+
+    log:
+      level: info
+      format: console
+      output: stdout

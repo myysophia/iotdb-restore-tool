@@ -1,0 +1,161 @@
+# ====================================
+# Binaries and programs
+# ====================================
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+iotdb-restore
+*.test
+*.out
+
+# ====================================
+# Test files and coverage
+# ====================================
+coverage.out
+coverage.html
+*.coverprofile
+
+# ====================================
+# Go workspace files
+# ====================================
+go.work
+go.work.sum
+
+# ====================================
+# IDE and editors
+# ====================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.bak
+*.tmp
+.project
+.classpath
+.settings/
+*.sublime-project
+*.sublime-workspace
+
+# ====================================
+# Operating systems
+# ====================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+
+# ====================================
+# Sensitive configuration files
+# ====================================
+# Local config overrides (may contain secrets)
+config.local.yaml
+*.local.yaml
+configs/config.local.yaml
+
+# Production config with real credentials
+configs/config.prod.yaml
+configs/config.production.yaml
+
+# Backup configs
+configs/*.bak
+configs/*.backup
+
+# ====================================
+# Kubernetes secrets and kubeconfig
+# ====================================
+# Never commit kubeconfig files (contains cluster credentials)
+*.kubeconfig
+kubeconfig
+.kube/config
+.kubeconfig
+.kube/configs
+
+# Kubernetes secrets (especially for kube-config)
+deployments/k8s/*secret*.yaml
+deployments/k8s/secrets/
+**/secrets/*.yaml
+
+# ====================================
+# Logs and temporary files
+# ====================================
+*.log
+*.log.*
+logs/
+log/
+tmp/
+temp/
+*.tmp
+*.temp
+
+# Response and test files
+response.log
+test-*.log
+*.tar.gz
+*.tgz
+
+# ====================================
+# Docker and build artifacts
+# ====================================
+# Docker build context
+.docker/
+
+# Image tarballs
+*.tar
+
+# ====================================
+# Environment files
+# ====================================
+.env
+.env.local
+.env.*.local
+*.env
+!.env.example
+
+# ====================================
+# Database and backup files
+# ====================================
+# IoTDB backup files
+*.tsfile.backup
+*.backup
+backup/
+backups/
+
+# SQL dumps
+*.sql
+*.sql.gz
+
+# ====================================
+# Certificates and keys
+# ====================================
+*.pem
+*.key
+*.crt
+*.cer
+*.p12
+*.pfx
+certs/
+keys/
+ssl/
+
+# ====================================
+# Documentation temporary files
+# ====================================
+~$*.doc*
+~$*.xls*
+~$*.ppt*
+
+# ====================================
+# Claude and AI tools
+# ====================================
+.claude/
+.claude-*
+
+configs/config.yaml

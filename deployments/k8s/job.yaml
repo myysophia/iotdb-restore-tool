@@ -1,0 +1,44 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: iotdb-restore
+  namespace: iotdb
+spec:
+  template:
+    spec:
+      serviceAccountName: iotdb-restore
+      restartPolicy: OnFailure
+      containers:
+      - name: iotdb-restore
+        image: iotdb-restore:latest
+        imagePullPolicy: IfNotPresent
+        args:
+        - "restore"
+        - "--config=/etc/iotdb-restore/config.yaml"
+        # 可以通过修改 args 来指定时间戳：
+        # - "-t=20260203083502"
+        env:
+        - name: TZ
+          value: "Asia/Shanghai"
+        volumeMounts:
+        - name: config
+          mountPath: /etc/iotdb-restore
+          readOnly: true
+        - name: kubeconfig
+          mountPath: /root/.kube
+          readOnly: true
+      volumes:
+      - name: config
+        configMap:
+          name: iotdb-restore-config
+      - name: kubeconfig
+        secret:
+          secretName: kube-config
+          optional: true
+      resources:
+        requests:
+          memory: "128Mi"
+          cpu: "100m"
+        limits:
+          memory: "256Mi"
+          cpu: "500m"

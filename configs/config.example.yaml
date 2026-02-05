@@ -1,0 +1,69 @@
+# IoTDB Restore Tool 配置文件示例
+# 复制此文件为 config.yaml 并填写真实的配置信息
+
+kubernetes:
+  # Kubernetes 命名空间
+  namespace: iotdb
+  # 目标 Pod 名称
+  pod_name: iotdb-datanode-0
+  # kubeconfig 文件路径（~ 会被自动展开为用户主目录）
+  # 在 Kubernetes 中运行时可以留空（使用 in-cluster config）
+  kubeconfig: ~/.kube/config
+  # Kubernetes context（可选，用于多集群环境）
+  context: ""
+
+iotdb:
+  # IoTDB 数据目录
+  data_dir: /iotdb/data
+  # IoTDB CLI 工具路径
+  cli_path: /iotdb/sbin/start-cli.sh
+  # IoTDB 服务地址
+  host: iotdb-datanode
+  port: 6667
+  # IoTDB 用户名
+  username: root
+  # IoTDB 密码
+  password: root
+
+backup:
+  # OSS 备份文件的基础 URL
+  # 示例: https://iotdb-backup.oss-accelerate.aliyuncs.com/ems-au
+  base_url: https://your-bucket.oss-accelerate.aliyuncs.com/your-path
+  # 本地下载目录
+  download_dir: /tmp
+  # 是否自动检测时间戳（会查找当前小时 35 分 01-10 秒的备份）
+  auto_detect_timestamp: true
+  # 时间戳格式（Go 格式化模板）
+  timestamp_pattern: "200601021504"
+
+import:
+  # 并发导入线程数（根据 Pod 性能调整，建议 1-4）
+  concurrency: 1
+  # 每批处理的文件数量（建议 3-50）
+  batch_size: 3
+  # 导入失败重试次数
+  retry_count: 3
+  # 批次间延迟（秒）
+  batch_delay: 3
+  # 是否在批次间暂停
+  batch_pause: true
+
+notification:
+  wechat:
+    # 企业微信 Webhook URL
+    # 获取方式: 企业微信后台 -> 应用管理 -> 自建应用 -> Webhook
+    webhook_url: https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=YOUR_WEBHOOK_KEY
+    # 是否启用企微通知
+    enabled: true
+  # 环境标识（会在通知中显示）
+  environment: EMS-AU
+  # 是否启用通知（总开关）
+  enabled: true
+
+log:
+  # 日志级别: debug, info, warn, error
+  level: info
+  # 日志格式: console, json
+  format: console
+  # 输出目标: stdout, stderr 或文件路径
+  output: stdout

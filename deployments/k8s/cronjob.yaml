@@ -1,0 +1,58 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: iotdb-restore
+  namespace: iotdb
+spec:
+  # 每天 02:00 执行恢复（使用前一天的 02:35:01-10 的备份）
+  schedule: "0 2 * * *"
+  # 如果上次任务还没完成，跳过本次执行
+  concurrencyPolicy: Forbid
+  # 保留最近 3 次成功的任务记录
+  successfulJobsHistoryLimit: 3
+  # 保留最近 1 次失败的任务记录
+  failedJobsHistoryLimit: 1
+  # 任务超时时间：2 小时
+  activeDeadlineSeconds: 7200
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: iotdb-restore
+          restartPolicy: OnFailure
+          containers:
+          - name: iotdb-restore
+            image: iotdb-restore:latest
+            imagePullPolicy: IfNotPresent
+            args:
+            - "restore"
+            - "--config=/etc/iotdb-restore/config.yaml"
+            # 使用自动检测时间戳（会查找当前小时 35 分的备份）
+            # 如需指定固定时间戳，取消下面注释：
+            # - "-t"
+            # - "20260205023502"
+            env:
+            - name: TZ
+              value: "Asia/Shanghai"
+            volumeMounts:
+            - name: config
+              mountPath: /etc/iotdb-restore
+              readOnly: true
+            - name: kubeconfig
+              mountPath: /root/.kube
+              readOnly: true
+          volumes:
+          - name: config
+            configMap:
+              name: iotdb-restore-config
+          - name: kubeconfig
+            secret:
+              secretName: kube-config
+              optional: true
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "1000m"
