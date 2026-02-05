@@ -287,4 +287,4 @@ make docker-push
 
 ## License
 
-Copyright © 2025 VNNOX
+Copyright © 2025 
