@@ -16,10 +16,10 @@ import (
 
 // Executor Pod 命令执行器
 type Executor struct {
-	clientset    *kubernetes.Clientset
-	restConfig   *rest.Config
-	namespace    string
-	podName      string
+	Clientset    *kubernetes.Clientset
+	RestConfig   *rest.Config
+	Namespace    string
+	PodName      string
 	container    string
 	config       *ExecutorConfig
 }
@@ -40,10 +40,10 @@ func NewExecutor(clientset *kubernetes.Clientset, restConfig *rest.Config, names
 	}
 
 	return &Executor{
-		clientset:  clientset,
-		restConfig: restConfig,
-		namespace:  namespace,
-		podName:    podName,
+		Clientset:  clientset,
+		RestConfig: restConfig,
+		Namespace:  namespace,
+		PodName:    podName,
 		config:     config,
 	}
 }
@@ -54,7 +54,7 @@ func (e *Executor) getContainerName(ctx context.Context) (string, error) {
 		return e.container, nil
 	}
 
-	pod, err := e.clientset.CoreV1().Pods(e.namespace).Get(ctx, e.podName, metav1.GetOptions{})
+	pod, err := e.Clientset.CoreV1().Pods(e.Namespace).Get(ctx, e.PodName, metav1.GetOptions{})
 	if err != nil {
 		return "", fmt.Errorf("获取 Pod 信息失败: %w", err)
 	}
@@ -81,10 +81,10 @@ func (e *Executor) Exec(ctx context.Context, command []string) (string, string, 
 	defer cancel()
 
 	// 准备执行请求
-	req := e.clientset.CoreV1().RESTClient().Post().
+	req := e.Clientset.CoreV1().RESTClient().Post().
 		Resource("pods").
-		Namespace(e.namespace).
-		Name(e.podName).
+		Namespace(e.Namespace).
+		Name(e.PodName).
 		SubResource("exec").
 		Param("container", containerName).
 		Param("command", command[0]).
@@ -98,7 +98,7 @@ func (e *Executor) Exec(ctx context.Context, command []string) (string, string, 
 	}
 
 	// 创建执行器
-	executor, err := remotecommand.NewSPDYExecutor(e.restConfig, "POST", req.URL())
+	executor, err := remotecommand.NewSPDYExecutor(e.RestConfig, "POST", req.URL())
 	if err != nil {
 		return "", "", fmt.Errorf("创建执行器失败: %w", err)
 	}
@@ -136,10 +136,10 @@ func (e *Executor) ExecStream(ctx context.Context, command []string, stdout, std
 	execCtx, cancel := context.WithTimeout(ctx, e.config.Timeout)
 	defer cancel()
 
-	req := e.clientset.CoreV1().RESTClient().Post().
+	req := e.Clientset.CoreV1().RESTClient().Post().
 		Resource("pods").
-		Namespace(e.namespace).
-		Name(e.podName).
+		Namespace(e.Namespace).
+		Name(e.PodName).
 		SubResource("exec").
 		Param("container", containerName).
 		Param("command", command[0]).
@@ -152,7 +152,7 @@ func (e *Executor) ExecStream(ctx context.Context, command []string, stdout, std
 		req.Param("command", cmd)
 	}
 
-	executor, err := remotecommand.NewSPDYExecutor(e.restConfig, "POST", req.URL())
+	executor, err := remotecommand.NewSPDYExecutor(e.RestConfig, "POST", req.URL())
 	if err != nil {
 		return fmt.Errorf("创建执行器失败: %w", err)
 	}

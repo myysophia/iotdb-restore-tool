@@ -36,6 +36,11 @@ type BackupConfig struct {
 	DownloadDir          string `mapstructure:"download_dir"`
 	AutoDetectTimestamp  bool   `mapstructure:"auto_detect_timestamp"`
 	TimestampPattern     string `mapstructure:"timestamp_pattern"`
+
+	// 下载策略配置
+	DownloadStrategy  string `mapstructure:"download_strategy"`   // "local" (本地下载+传输) 或 "pod" (Pod直接下载)
+	LocalTempDir      string `mapstructure:"local_temp_dir"`      // 本地临时目录
+	CleanupLocalFiles bool   `mapstructure:"cleanup_local_files"` // 是否清理本地文件（已废弃，始终清理）
 }
 
 // ImportConfig 导入配置
@@ -107,5 +112,12 @@ func (c *Config) SetDefaults() {
 	}
 	if c.Backup.DownloadDir == "" {
 		c.Backup.DownloadDir = "/tmp"
+	}
+	// 设置下载策略默认值
+	if c.Backup.DownloadStrategy == "" {
+		c.Backup.DownloadStrategy = "local" // 默认使用本地下载+传输策略
+	}
+	if c.Backup.LocalTempDir == "" {
+		c.Backup.LocalTempDir = "/tmp/iotdb-restore"
 	}
 }

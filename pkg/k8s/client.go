@@ -49,7 +49,7 @@ func NewClient(kubeconfigPath string) (*kubernetes.Clientset, error) {
 	kubeconfigPath = expandPath(kubeconfigPath)
 
 	// 如果指定了 kubeconfig 路径，使用它
-	if kubeconfigPath != "" && kubeconfigPath != "" {
+	if kubeconfigPath != "" {
 		config, err = clientcmd.BuildConfigFromFlags("", kubeconfigPath)
 		if err != nil {
 			return nil, fmt.Errorf("从 kubeconfig 文件构建配置失败: %w", err)
@@ -89,7 +89,7 @@ func NewConfig(kubeconfigPath string) (*rest.Config, error) {
 	kubeconfigPath = expandPath(kubeconfigPath)
 
 	// 如果指定了 kubeconfig 路径，使用它
-	if kubeconfigPath != "" && kubeconfigPath != "" {
+	if kubeconfigPath != "" {
 		config, err = clientcmd.BuildConfigFromFlags("", kubeconfigPath)
 		if err != nil {
 			return nil, fmt.Errorf("从 kubeconfig 文件构建配置失败: %w", err)

@@ -3,10 +3,13 @@ package restorer
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/vnnox/iotdb-restore-tool/pkg/config"
+	"github.com/vnnox/iotdb-restore-tool/pkg/downloader"
 	"github.com/vnnox/iotdb-restore-tool/pkg/k8s"
 	"github.com/vnnox/iotdb-restore-tool/pkg/logger"
 	"go.uber.org/zap"
@@ -125,7 +128,8 @@ func (r *IoTDBRestorer) downloadBackup(ctx context.Context, backupFile string) e
 	logger.Info("步骤 1: 下载备份文件", zap.String("file", backupFile))
 
 	// 检查文件是否已存在
-	exists, err := r.executor.FileExists(ctx, filepath.Join("/tmp", backupFile))
+	remotePath := filepath.Join("/tmp", backupFile)
+	exists, err := r.executor.FileExists(ctx, remotePath)
 	if err != nil {
 		return err
 	}
@@ -135,13 +139,118 @@ func (r *IoTDBRestorer) downloadBackup(ctx context.Context, backupFile string) e
 		return nil
 	}
 
-	// 在 Pod 中执行下载命令
+	// 构建备份文件 URL
 	backupURL := fmt.Sprintf("%s/%s", r.config.Backup.BaseURL, backupFile)
-	cmd := fmt.Sprintf("wget -q -O /tmp/%s '%s'", backupFile, backupURL)
+
+	// 根据策略选择下载方式
+	strategy := r.config.Backup.DownloadStrategy
+	if strategy == "" {
+		strategy = "local" // 默认使用本地下载+传输
+	}
+
+	logger.Info("使用下载策略", zap.String("strategy", strategy))
+
+	switch strategy {
+	case "local":
+		// 本地下载 + 传输到 Pod
+		return r.downloadAndTransfer(ctx, backupURL, backupFile, remotePath)
+	case "pod":
+		// Pod 直接下载（原有方式）
+		return r.downloadInPod(ctx, backupURL, backupFile, remotePath)
+	default:
+		return fmt.Errorf("未知的下载策略: %s", strategy)
+	}
+}
+
+// downloadAndTransfer 本地下载后传输到 Pod（新策略）
+func (r *IoTDBRestorer) downloadAndTransfer(ctx context.Context, backupURL, backupFile, remotePath string) error {
+	logger.Info("使用本地下载 + 传输策略",
+		zap.String("url", backupURL),
+		zap.String("remote", remotePath),
+	)
+
+	// 1. 本地下载
+	downloader := downloader.NewOSSDownloader()
+	localTempDir := r.config.Backup.LocalTempDir
+	if localTempDir == "" {
+		localTempDir = os.TempDir()
+	}
+
+	localPath, err := downloader.DownloadToLocal(ctx, backupURL, localTempDir)
+	if err != nil {
+		return fmt.Errorf("本地下载失败: %w", err)
+	}
+
+	logger.Info("本地下载完成", zap.String("path", localPath))
+
+	// 2. 确保本地文件会被清理（使用 defer）
+	defer func() {
+		if err := os.Remove(localPath); err != nil {
+			logger.Warn("清理本地文件失败",
+				zap.String("path", localPath),
+				zap.Error(err),
+			)
+		} else {
+			logger.Info("本地文件已清理", zap.String("path", localPath))
+		}
+	}()
+
+	// 3. 传输到 Pod（带重试）
+	const maxRetries = 3
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			logger.Warn("传输重试",
+				zap.Int("attempt", attempt+1),
+				zap.Int("max_retries", maxRetries),
+			)
+			time.Sleep(time.Duration(attempt) * 5 * time.Second)
+		}
+
+		// 创建传输器
+		transfer := k8s.NewTransfer(
+			r.executor.Clientset,
+			r.executor.RestConfig,
+			r.executor.Namespace,
+			r.executor.PodName,
+		)
+
+		if err := transfer.CopyFile(ctx, localPath, remotePath); err != nil {
+			logger.Warn("传输失败",
+				zap.Int("attempt", attempt+1),
+				zap.Error(err),
+			)
+
+			// 最后一次重试失败，降级到 Pod 下载
+			if attempt == maxRetries-1 {
+				logger.Warn("本地传输失败，降级到 Pod 下载", zap.Error(err))
+				return r.downloadInPod(ctx, backupURL, backupFile, remotePath)
+			}
+			continue
+		}
+
+		// 传输成功
+		logger.Info("文件传输完成",
+			zap.String("local", localPath),
+			zap.String("remote", remotePath),
+		)
+		return nil
+	}
+
+	return fmt.Errorf("传输失败，已重试 %d 次", maxRetries)
+}
+
+// downloadInPod 在 Pod 中直接下载（原有方式）
+func (r *IoTDBRestorer) downloadInPod(ctx context.Context, backupURL, backupFile, remotePath string) error {
+	logger.Info("使用 Pod 下载策略",
+		zap.String("url", backupURL),
+		zap.String("remote", remotePath),
+	)
+
+	cmd := fmt.Sprintf("wget -q -O '%s' '%s'", remotePath, backupURL)
 
 	logger.Info("开始下载备份文件",
 		zap.String("url", backupURL),
-		zap.String("dest", "/tmp/"+backupFile),
+		zap.String("dest", remotePath),
 	)
 
 	stdout, stderr, err := r.executor.Exec(ctx, []string{"sh", "-c", cmd})
@@ -152,6 +261,7 @@ func (r *IoTDBRestorer) downloadBackup(ctx context.Context, backupFile string) e
 	logger.Info("下载完成", zap.String("output", stdout))
 	return nil
 }
+
 
 // extractBackup 解压备份文件
 func (r *IoTDBRestorer) extractBackup(ctx context.Context, backupFile string) error {
@@ -169,23 +279,57 @@ func (r *IoTDBRestorer) extractBackup(ctx context.Context, backupFile string) er
 		logger.Warn("备份数据目录失败", zap.Error(err))
 	}
 
-	// 解压文件
-	extractCmd := fmt.Sprintf("tar --overwrite -xzf /tmp/%s -C %s/", backupFile, r.config.IoTDB.DataDir)
+	// 检查备份文件大小
+	checkCmd := fmt.Sprintf("ls -lh /tmp/%s | awk '{print $5}'", backupFile)
+	sizeOutput, _ := r.executor.ExecSimple(ctx, checkCmd)
+	logger.Info("备份文件大小", zap.String("size", strings.TrimSpace(sizeOutput)))
 
-	logger.Info("开始解压", zap.String("cmd", extractCmd))
+	// 使用 pigz 进行并行解压（如果可用），否则使用 gzip
+	// 方案 1: 优先使用 pigz（多线程）
+	extractCmd := fmt.Sprintf("cd /tmp && tar --overwrite -I 'pigz -p 4' -xf %s -C %s/ 2>&1 | tail -10", backupFile, r.config.IoTDB.DataDir)
 
-	stdout, stderr, err := r.executor.Exec(ctx, []string{"sh", "-c", extractCmd})
-	if err != nil {
-		return fmt.Errorf("解压失败: %w: %s", err, stderr)
+	// 降级方案：如果 pigz 不可用，使用普通 gzip
+	fallbackCmd := fmt.Sprintf("cd /tmp && tar --overwrite -xzf %s -C %s/ 2>&1 | tail -10", backupFile, r.config.IoTDB.DataDir)
+
+	// 先检查 pigz 是否可用
+	checkPigz := "command -v pigz >/dev/null 2>&1"
+	if _, _, err := r.executor.Exec(ctx, []string{"sh", "-c", checkPigz}); err == nil {
+		logger.Info("使用 pigz 并行解压（4 线程）")
+		logger.Info("开始解压", zap.String("cmd", extractCmd))
+		stdout, stderr, err := r.executor.Exec(ctx, []string{"sh", "-c", extractCmd})
+		if err != nil {
+			logger.Warn("pigz 解压失败，尝试使用 gzip", zap.Error(err))
+			// 降级到 gzip
+			logger.Info("使用 gzip 单线程解压")
+			logger.Info("开始解压", zap.String("cmd", fallbackCmd))
+			stdout, stderr, err = r.executor.Exec(ctx, []string{"sh", "-c", fallbackCmd})
+			if err != nil {
+				return fmt.Errorf("解压失败: %w: %s", err, stderr)
+			}
+		}
+		logger.Info("解压完成", zap.String("output", stdout))
+	} else {
+		logger.Info("pigz 不可用，使用 gzip 单线程解压（建议安装 pigz 以加速）")
+		logger.Info("开始解压", zap.String("cmd", fallbackCmd))
+		stdout, stderr, err := r.executor.Exec(ctx, []string{"sh", "-c", fallbackCmd})
+		if err != nil {
+			return fmt.Errorf("解压失败: %w: %s", err, stderr)
+		}
+		logger.Info("解压完成", zap.String("output", stdout))
 	}
-
-	logger.Info("解压完成", zap.String("output", stdout))
 
 	// 显示解压后的文件结构
 	listCmd := fmt.Sprintf("find %s -type f | head -20", r.config.IoTDB.DataDir)
 	listOutput, err := r.executor.ExecSimple(ctx, listCmd)
 	if err == nil {
 		logger.Info("解压后的文件结构", zap.String("files", listOutput))
+	}
+
+	// 统计解压的文件数量和总大小
+	statCmd := fmt.Sprintf("find %s -type f | wc -l && du -sh %s", r.config.IoTDB.DataDir, r.config.IoTDB.DataDir)
+	statOutput, _ := r.executor.ExecSimple(ctx, statCmd)
+	if statOutput != "" {
+		logger.Info("解压统计", zap.String("stats", strings.TrimSpace(statOutput)))
 	}
 
 	return nil

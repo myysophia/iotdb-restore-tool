@@ -243,3 +243,29 @@ func ExtractFilename(url string) string {
 	}
 	return "downloaded_file"
 }
+
+// DownloadToLocal 下载文件到本地目录
+// 返回下载后的本地文件完整路径
+func (d *OSSDownloader) DownloadToLocal(ctx context.Context, url, localDir string) (string, error) {
+	// 1. 确保目标目录存在
+	if err := os.MkdirAll(localDir, 0755); err != nil {
+		return "", fmt.Errorf("创建目标目录失败: %w", err)
+	}
+
+	// 2. 从 URL 中提取文件名
+	filename := ExtractFilename(url)
+	destPath := filepath.Join(localDir, filename)
+
+	// 3. 下载文件
+	if err := d.DownloadWithProgress(ctx, url, destPath); err != nil {
+		return "", fmt.Errorf("下载失败: %w", err)
+	}
+
+	logger.Info("本地下载完成",
+		zap.String("url", url),
+		zap.String("local_path", destPath),
+	)
+
+	return destPath, nil
+}
+
