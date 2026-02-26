@@ -4,15 +4,16 @@ metadata:
   name: iotdb-restore
   namespace: iotdb
 spec:
-  # 每天 02:00 执行恢复（使用前一天的 02:35:01-10 的备份）
-  schedule: "0 2 * * *"
-  # 如果上次任务还没完成，跳过本次执行
+  # 每 2 小时执行一次（任务需要 1 小时，留 1 小时缓冲）
+  # 如需每小时执行，改为 "0 * * * *"，但必须配合 concurrencyPolicy: Forbid
+  schedule: "0 */2 * * *"
+  # 如果上次任务还没完成，跳过本次执行（重要！）
   concurrencyPolicy: Forbid
   # 保留最近 3 次成功的任务记录
   successfulJobsHistoryLimit: 3
   # 保留最近 1 次失败的任务记录
   failedJobsHistoryLimit: 1
-  # 任务超时时间：2 小时
+  # 任务超时时间：2 小时（防止任务卡死）
   activeDeadlineSeconds: 7200
   jobTemplate:
     spec:
