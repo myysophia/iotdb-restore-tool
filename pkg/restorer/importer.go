@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -14,6 +15,8 @@ import (
 	"go.uber.org/zap"
 )
 
+const importRetryBaseDelay = 10 * time.Second
+
 // ImportResult 导入结果
 type ImportResult struct {
 	TotalFiles   int
@@ -22,17 +25,22 @@ type ImportResult struct {
 	Duration     time.Duration
 }
 
+// RegionReadyFunc 在导入重试前确认 Region 已就绪。
+type RegionReadyFunc func(context.Context) error
+
 // Importer tsfile 导入器
 type Importer struct {
-	executor *k8s.Executor
-	config   *config.Config
+	executor    *k8s.Executor
+	config      *config.Config
+	regionReady RegionReadyFunc
 }
 
 // NewImporter 创建导入器
-func NewImporter(executor *k8s.Executor, cfg *config.Config) *Importer {
+func NewImporter(executor *k8s.Executor, cfg *config.Config, regionReady RegionReadyFunc) *Importer {
 	return &Importer{
-		executor: executor,
-		config:   cfg,
+		executor:    executor,
+		config:      cfg,
+		regionReady: regionReady,
 	}
 }
 
@@ -45,18 +53,14 @@ func (im *Importer) Import(ctx context.Context, files []string) (*ImportResult, 
 		zap.Int("total_files", totalFiles),
 		zap.Int("concurrency", im.config.Import.Concurrency),
 		zap.Int("batch_size", im.config.Import.BatchSize),
+		zap.Int("retry_count", im.config.Import.RetryCount),
 	)
 
-	// 使用信号量控制并发数
 	sem := make(chan struct{}, im.config.Import.Concurrency)
-
-	// 原子计数器
 	var successCount int64
 	var failedCount int64
-
 	var wg sync.WaitGroup
 
-	// 分批处理
 	batchSize := im.config.Import.BatchSize
 	for i := 0; i < totalFiles; i += batchSize {
 		end := i + batchSize
@@ -75,20 +79,16 @@ func (im *Importer) Import(ctx context.Context, files []string) (*ImportResult, 
 			zap.Int("progress", i),
 		)
 
-		// 显示内存使用
 		im.logMemoryUsage(ctx)
 
-		// 并发导入当前批次
 		for _, file := range batch {
 			wg.Add(1)
 			go func(f string) {
 				defer wg.Done()
 
-				// 获取信号量
 				sem <- struct{}{}
 				defer func() { <-sem }()
 
-				// 导入单个文件
 				if err := im.importSingleFile(ctx, f); err != nil {
 					atomic.AddInt64(&failedCount, 1)
 					logger.Error("导入失败",
@@ -97,17 +97,13 @@ func (im *Importer) Import(ctx context.Context, files []string) (*ImportResult, 
 					)
 				} else {
 					atomic.AddInt64(&successCount, 1)
-					logger.Debug("导入成功",
-						zap.String("file", filepath.Base(f)),
-					)
+					logger.Debug("导入成功", zap.String("file", filepath.Base(f)))
 				}
 			}(file)
 		}
 
-		// 等待当前批次完成
 		wg.Wait()
 
-		// 批次间暂停
 		if i+batchSize < totalFiles && im.config.Import.BatchPause {
 			logger.Info("等待系统释放内存...",
 				zap.Int("pause_seconds", im.config.Import.BatchDelay),
@@ -134,60 +130,113 @@ func (im *Importer) Import(ctx context.Context, files []string) (*ImportResult, 
 	return result, nil
 }
 
-// importSingleFile 导入单个文件
+// importSingleFile 导入单个文件，并对 Region 未就绪问题重试。
 func (im *Importer) importSingleFile(ctx context.Context, filePath string) error {
 	filename := filepath.Base(filePath)
+	maxAttempts := im.config.Import.RetryCount
+	if maxAttempts <= 0 {
+		maxAttempts = 1
+	}
 
-	logger.Debug("开始导入文件", zap.String("file", filename))
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		logger.Debug("开始导入文件",
+			zap.String("file", filename),
+			zap.Int("attempt", attempt),
+			zap.Int("max_attempts", maxAttempts),
+		)
 
-	// 构建 IoTDB load 命令
+		if err := im.runLoadCommand(ctx, filePath); err != nil {
+			lastErr = err
+			if !isRetryableImportError(err) || attempt == maxAttempts {
+				return err
+			}
+
+			logger.Warn("检测到 Region 未就绪，准备重试导入",
+				zap.String("file", filename),
+				zap.Int("attempt", attempt),
+				zap.Error(err),
+			)
+
+			if im.regionReady != nil {
+				if readyErr := im.regionReady(ctx); readyErr != nil {
+					lastErr = fmt.Errorf("等待 Region 就绪失败: %w", readyErr)
+					if attempt == maxAttempts {
+						return lastErr
+					}
+				}
+			}
+
+			time.Sleep(time.Duration(attempt) * importRetryBaseDelay)
+			continue
+		}
+
+		return nil
+	}
+
+	return lastErr
+}
+
+func (im *Importer) runLoadCommand(ctx context.Context, filePath string) error {
 	cmd := fmt.Sprintf("%s -h %s -e \"load '%s' verify=false\"",
 		im.config.IoTDB.CLIPath,
 		im.config.IoTDB.Host,
 		filePath,
 	)
 
-	// 执行命令
 	stdout, stderr, err := im.executor.Exec(ctx, []string{"sh", "-c", cmd})
-
-	// 检查是否成功
 	if err != nil {
-		return fmt.Errorf("执行命令失败: %w: %s", err, stderr)
+		return fmt.Errorf("执行命令失败: %w: %s", err, strings.TrimSpace(stderr))
 	}
 
-	// 检查输出中是否包含 "successfully"
 	if !containsSuccess(stdout) && !containsSuccess(stderr) {
-		return fmt.Errorf("导入失败: %s", stderr)
+		msg := strings.TrimSpace(stderr)
+		if msg == "" {
+			msg = strings.TrimSpace(stdout)
+		}
+		return fmt.Errorf("导入失败: %s", msg)
 	}
 
 	return nil
 }
 
-// containsSuccess 检查输出是否包含成功标记
-func containsSuccess(output string) bool {
-	return contains(output, "successfully") ||
-		contains(output, "success") ||
-		contains(output, "Success")
-}
+func isRetryableImportError(err error) bool {
+	if err == nil {
+		return false
+	}
 
-// contains 检查字符串是否包含子串（不区分大小写）
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) &&
-		(s == substr ||
-		 len(s) > len(substr) && (
-			s[:len(substr)] == substr ||
-			s[len(s)-len(substr):] == substr ||
-			indexOf(s, substr) >= 0))
-}
+	message := strings.ToLower(err.Error())
+	if strings.Contains(message, "readonly") {
+		return false
+	}
 
-// indexOf 简单的字符串查找
-func indexOf(s, substr string) int {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return i
+	retryablePatterns := []string{
+		"schemaregion",
+		"doesn't exist",
+		"failed to get replicaset of consensus group",
+		"auto create or verify schema error",
+		"consensus group",
+	}
+
+	for _, pattern := range retryablePatterns {
+		if strings.Contains(message, pattern) {
+			return true
 		}
 	}
-	return -1
+
+	if strings.Contains(message, "status code: 701") &&
+		(strings.Contains(message, "schema") || strings.Contains(message, "region")) {
+		return true
+	}
+
+	return false
+}
+
+// containsSuccess 检查输出是否包含成功标记。
+func containsSuccess(output string) bool {
+	message := strings.ToLower(output)
+	return strings.Contains(message, "successfully") ||
+		strings.Contains(message, "success")
 }
 
 // logMemoryUsage 记录内存使用情况

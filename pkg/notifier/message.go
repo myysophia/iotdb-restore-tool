@@ -18,10 +18,10 @@ type MessageTemplate struct {
 
 // Statistics 统计信息
 type Statistics struct {
-	StartTime   string
-	EndTime     string
-	Duration    string
-	TotalFiles  int
+	StartTime    string
+	EndTime      string
+	Duration     string
+	TotalFiles   int
 	SuccessCount int
 	FailedCount  int
 }
@@ -50,6 +50,26 @@ func BuildMessage(result *restorer.RestoreResult, environment string) string {
 	message += fmt.Sprintf("| **失败数量** | %d 个 |\n", result.FailedCount)
 
 	message += "\n---\n\n"
+
+	if result.Probe != nil && result.Probe.Executed {
+		message += "### 🩺 数据库自检\n\n"
+		message += "| 项目 | 详情 |\n"
+		message += "|------|------|\n"
+		message += fmt.Sprintf("| **数据库** | %s |\n", result.Probe.Database)
+		message += fmt.Sprintf("| **探测序列** | `%s` |\n", result.Probe.SeriesPath)
+		message += fmt.Sprintf("| **写入时间戳** | %d |\n", result.Probe.Timestamp)
+		message += fmt.Sprintf("| **写入值** | %d |\n", result.Probe.Value)
+		if result.Probe.QueryResult != "" {
+			message += fmt.Sprintf("| **查询结果** | %s |\n", result.Probe.QueryResult)
+		}
+		if result.Probe.Error != "" {
+			message += fmt.Sprintf("| **自检状态** | 失败 |\n")
+			message += fmt.Sprintf("| **自检错误** | %s |\n", result.Probe.Error)
+		} else {
+			message += fmt.Sprintf("| **自检状态** | 成功 |\n")
+		}
+		message += "\n---\n\n"
+	}
 
 	if result.Error != nil {
 		message += "### ❌ 恢复失败\n\n"

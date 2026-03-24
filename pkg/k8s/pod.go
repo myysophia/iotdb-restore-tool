@@ -3,8 +3,10 @@ package k8s
 import (
 	"context"
 	"fmt"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 )
@@ -27,6 +29,9 @@ func NewPodChecker(clientset *kubernetes.Clientset, namespace string) *PodChecke
 func (p *PodChecker) Exists(ctx context.Context, podName string) (bool, error) {
 	_, err := p.clientset.CoreV1().Pods(p.namespace).Get(ctx, podName, metav1.GetOptions{})
 	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
 		return false, fmt.Errorf("获取 Pod 失败: %w", err)
 	}
 	return true, nil
@@ -57,6 +62,69 @@ func (p *PodChecker) IsRunning(ctx context.Context, podName string) (bool, error
 		return false, err
 	}
 	return *phase == corev1.PodRunning, nil
+}
+
+// Delete 删除 Pod，通常由 StatefulSet 自动重建。
+func (p *PodChecker) Delete(ctx context.Context, podName string) error {
+	if err := p.clientset.CoreV1().Pods(p.namespace).Delete(ctx, podName, metav1.DeleteOptions{}); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("删除 Pod 失败: %w", err)
+	}
+	return nil
+}
+
+// IsReady 检查 Pod 是否为 Running 且所有容器 Ready。
+func (p *PodChecker) IsReady(ctx context.Context, podName string) (bool, *corev1.Pod, error) {
+	pod, err := p.GetPod(ctx, podName)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil, nil
+		}
+		return false, nil, err
+	}
+
+	if pod.Status.Phase != corev1.PodRunning {
+		return false, pod, nil
+	}
+
+	if len(pod.Status.ContainerStatuses) == 0 {
+		return false, pod, nil
+	}
+
+	for _, status := range pod.Status.ContainerStatuses {
+		if !status.Ready {
+			return false, pod, nil
+		}
+	}
+
+	return true, pod, nil
+}
+
+// WaitReady 等待 Pod 进入 Running/Ready。
+func (p *PodChecker) WaitReady(ctx context.Context, podName string, timeout, interval time.Duration) error {
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		ready, _, err := p.IsReady(waitCtx, podName)
+		if err != nil {
+			return err
+		}
+		if ready {
+			return nil
+		}
+
+		select {
+		case <-waitCtx.Done():
+			return fmt.Errorf("等待 Pod Ready 超时: %w", waitCtx.Err())
+		case <-ticker.C:
+		}
+	}
 }
 
 // GetPodInfo 获取 Pod 的详细信息（用于日志）
