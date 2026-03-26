@@ -76,6 +76,77 @@ SQL 中的时间戳：
 - 从 **02:43:06 UTC** 开始，`root.energy` 已被删除
 - 到 **03:14:24 UTC** 前，数据一直处于重新导入中
 
+### 3.2.1 按时间线展示为什么恢复期间会查不到数据
+
+下面这张图把本次恢复窗口和查询结果变化放在同一条时间线上：
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant User as 用户查询
+    participant API as 查询入口/CLI
+    participant IoTDB as IoTDB(root.energy)
+    participant Restore as 恢复任务
+
+    Note over Restore: 2026-03-25 02:43:03 UTC<br/>开始执行恢复
+    Restore->>IoTDB: 删除 root.energy / 清理旧数据
+    Note over IoTDB: 2026-03-25 02:43:06 UTC<br/>root.energy 已删除
+
+    User->>API: 查询设备数据
+    API->>IoTDB: select * from root.energy.sn25627A000014596.BATTERY where time >= 1773532800000
+    IoTDB-->>API: 空结果 / 查不到目标设备数据
+    API-->>User: 看起来像“没有数据”
+
+    Note over Restore,IoTDB: 02:43:06 - 03:14:24 UTC<br/>逐批导入 tsfile<br/>部分设备可能先恢复，部分设备仍不可见
+
+    User->>API: 再次查询同一 SQL
+    API->>IoTDB: 同一条查询
+    IoTDB-->>API: 仍可能为空，或仅部分数据可见
+    API-->>User: 结果不稳定
+
+    Note over Restore: 2026-03-25 03:14:24 UTC<br/>所有文件导入完成
+    Note over Restore: 2026-03-25 03:14:26 UTC<br/>数据库探测成功
+
+    User->>API: 恢复完成后再次查询
+    API->>IoTDB: 同一条查询
+    IoTDB-->>API: 返回目标设备历史数据
+    API-->>User: 查询恢复正常
+```
+
+如果用更直观的状态图表示，可以理解为：
+
+```text
+时间线(UTC)
+
+02:43:03   02:43:06                         03:14:24   03:14:26
+   |           |                                 |          |
+   |           |                                 |          |
+   |           +-- root.energy 删除完成 ----------+          |
+   |                                              |          |
+   +-- 恢复开始                                   +-- 全量导入完成
+                                                             +-- 数据库探测成功
+
+库内可见性变化
+
+[恢复前数据可查]
+        |
+        v
+[空库 / 目标设备不可见]
+        |
+        v
+[导入中: 部分设备可见，部分设备仍不可见]
+        |
+        v
+[恢复完成: 查询结果稳定]
+```
+
+因此，只要查询落在 **02:43:06 UTC 到 03:14:24 UTC** 之间，就完全可能出现：
+
+- 第一次查为空
+- 稍后再查又有数据
+
+这不是数据回来了，而是对应数据在那个时间窗里刚好还没导入完成。
+
 ### 3.3 系统中确实配置了周期性自动恢复
 
 系统定时任务中存在如下恢复任务：
