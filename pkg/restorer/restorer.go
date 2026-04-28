@@ -65,10 +65,11 @@ type RestoreResult struct {
 
 // IoTDBRestorer IoTDB 恢复器
 type IoTDBRestorer struct {
-	executor  *k8s.Executor
-	config    *config.Config
-	result    *RestoreResult
-	startTime time.Time
+	executor       *k8s.Executor
+	config         *config.Config
+	result         *RestoreResult
+	startTime      time.Time
+	restoreScanDir string
 }
 
 type regionSnapshot struct {
@@ -104,6 +105,7 @@ func (r *IoTDBRestorer) Restore(ctx context.Context, opts RestoreOptions) (resul
 	}()
 
 	logger.Info("开始执行恢复操作",
+		zap.String("source_type", r.config.Backup.SourceType),
 		zap.String("timestamp", opts.Timestamp),
 		zap.Bool("dry_run", opts.DryRun),
 		zap.Bool("skip_delete", opts.SkipDelete),
@@ -127,16 +129,18 @@ func (r *IoTDBRestorer) Restore(ctx context.Context, opts RestoreOptions) (resul
 		return r.result, fmt.Errorf("数据库和 Region 就绪检查失败: %w", err)
 	}
 
-	backupFile := fmt.Sprintf("emsau_%s_%s.tar.gz", r.config.Kubernetes.PodName, opts.Timestamp)
-	r.result.BackupFile = backupFile
+	inputRef := r.restoreInputRef(opts.Timestamp)
+	r.result.BackupFile = inputRef
 
-	if err = r.downloadBackup(ctx, backupFile); err != nil {
-		return r.result, fmt.Errorf("下载备份文件失败: %w", err)
+	if err = r.prepareRestoreInput(ctx, opts.Timestamp); err != nil {
+		return r.result, fmt.Errorf("准备恢复输入失败: %w", err)
 	}
-	defer r.cleanup(ctx, backupFile)
+	defer r.cleanup(ctx, inputRef)
 
-	if err = r.extractBackup(ctx, backupFile); err != nil {
-		return r.result, fmt.Errorf("解压备份文件失败: %w", err)
+	if !r.config.Backup.UsesClusterStream() {
+		if err = r.extractBackup(ctx, inputRef); err != nil {
+			return r.result, fmt.Errorf("解压备份文件失败: %w", err)
+		}
 	}
 
 	importResult, err := r.importTsFiles(ctx)
@@ -160,6 +164,22 @@ func (r *IoTDBRestorer) Restore(ctx context.Context, opts RestoreOptions) (resul
 	)
 
 	return r.result, nil
+}
+
+func (r *IoTDBRestorer) restoreInputRef(timestamp string) string {
+	if r.config.Backup.UsesClusterStream() {
+		return fmt.Sprintf("cluster_stream:%s/%s", r.config.Backup.SourceNamespace, r.config.Backup.SourcePodName)
+	}
+	return fmt.Sprintf("emsau_%s_%s.tar.gz", r.config.Kubernetes.PodName, timestamp)
+}
+
+func (r *IoTDBRestorer) prepareRestoreInput(ctx context.Context, timestamp string) error {
+	r.restoreScanDir = ""
+	if r.config.Backup.UsesClusterStream() {
+		return r.streamClusterData(ctx)
+	}
+	backupFile := r.restoreInputRef(timestamp)
+	return r.downloadBackup(ctx, backupFile)
 }
 
 // downloadBackup 下载备份文件到 Pod
@@ -193,6 +213,141 @@ func (r *IoTDBRestorer) downloadBackup(ctx context.Context, backupFile string) e
 	default:
 		return fmt.Errorf("未知的下载策略: %s", strategy)
 	}
+}
+
+func (r *IoTDBRestorer) streamClusterData(ctx context.Context) error {
+	logger.Info("步骤 1: 从同集群源 Pod 拉取 tsfile 数据",
+		zap.String("source_namespace", r.config.Backup.SourceNamespace),
+		zap.String("source_pod", r.config.Backup.SourcePodName),
+		zap.String("source_data_dir", r.config.Backup.SourceDataDir),
+		zap.String("staging_dir", r.config.Backup.StagingDir),
+	)
+
+	archivePath := r.clusterStreamArchivePath()
+	cleanupOnError := func() {
+		cleanupCmd := fmt.Sprintf("rm -f '%s' && rm -rf '%s'", archivePath, r.config.Backup.StagingDir)
+		if _, _, cleanupErr := r.executor.Exec(ctx, []string{"sh", "-c", cleanupCmd}); cleanupErr != nil {
+			logger.Warn("清理失败的直连恢复临时文件失败",
+				zap.String("archive_path", archivePath),
+				zap.String("staging_dir", r.config.Backup.StagingDir),
+				zap.Error(cleanupErr),
+			)
+		}
+	}
+
+	sourceExecutor := k8s.NewExecutor(
+		r.executor.Clientset,
+		r.executor.RestConfig,
+		r.config.Backup.SourceNamespace,
+		r.config.Backup.SourcePodName,
+		nil,
+	)
+	sourceChecker := k8s.NewPodChecker(r.executor.Clientset, r.config.Backup.SourceNamespace)
+	exists, err := sourceChecker.Exists(ctx, r.config.Backup.SourcePodName)
+	if err != nil {
+		return fmt.Errorf("检查源 Pod 失败: %w", err)
+	}
+	if !exists {
+		return fmt.Errorf("源 Pod %s/%s 不存在", r.config.Backup.SourceNamespace, r.config.Backup.SourcePodName)
+	}
+	running, err := sourceChecker.IsRunning(ctx, r.config.Backup.SourcePodName)
+	if err != nil {
+		return fmt.Errorf("检查源 Pod 状态失败: %w", err)
+	}
+	if !running {
+		return fmt.Errorf("源 Pod %s/%s 未处于运行状态", r.config.Backup.SourceNamespace, r.config.Backup.SourcePodName)
+	}
+
+	if _, err := sourceExecutor.ExecSimple(ctx, fmt.Sprintf(
+		"test -d '%s/data/sequence' -a -d '%s/data/unsequence'",
+		r.config.Backup.SourceDataDir,
+		r.config.Backup.SourceDataDir,
+	)); err != nil {
+		return fmt.Errorf("源数据目录结构不符合预期: %w", err)
+	}
+
+	logger.Info("刷新源集群数据",
+		zap.String("source_namespace", r.config.Backup.SourceNamespace),
+		zap.String("source_pod", r.config.Backup.SourcePodName),
+	)
+	if _, _, err := sourceExecutor.Exec(ctx, []string{
+		"sh", "-c",
+		fmt.Sprintf("%s -h %s -e \"flush on cluster\"", r.config.IoTDB.CLIPath, r.config.IoTDB.Host),
+	}); err != nil {
+		return fmt.Errorf("刷新源集群失败: %w", err)
+	}
+
+	if _, _, err := r.executor.Exec(ctx, []string{
+		"sh", "-c",
+		fmt.Sprintf("rm -f '%s' && rm -rf '%s'", archivePath, r.config.Backup.StagingDir),
+	}); err != nil {
+		return fmt.Errorf("清理旧的 staging 和归档失败: %w", err)
+	}
+
+	transfer := k8s.NewTransfer(
+		r.executor.Clientset,
+		r.executor.RestConfig,
+		r.executor.Namespace,
+		r.executor.PodName,
+	)
+	if err := transfer.CopyDirectoryAsArchiveFromPod(
+		ctx,
+		r.config.Backup.SourceNamespace,
+		r.config.Backup.SourcePodName,
+		r.config.Backup.SourceDataDir,
+		[]string{"data/sequence", "data/unsequence"},
+		archivePath,
+	); err != nil {
+		cleanupOnError()
+		return fmt.Errorf("从源 Pod 复制数据失败: %w", err)
+	}
+
+	archiveStats, err := r.executor.ExecSimple(ctx, fmt.Sprintf("test -s '%s' && wc -c < '%s'", archivePath, archivePath))
+	if err != nil {
+		cleanupOnError()
+		return fmt.Errorf("目标 Pod 临时归档校验失败: %w", err)
+	}
+	logger.Info("直连恢复归档已落盘",
+		zap.String("archive_path", archivePath),
+		zap.String("archive_bytes", strings.TrimSpace(archiveStats)),
+	)
+
+	if _, _, err := r.executor.Exec(ctx, []string{
+		"sh", "-c",
+		fmt.Sprintf("tar -tf '%s' >/dev/null", archivePath),
+	}); err != nil {
+		cleanupOnError()
+		return fmt.Errorf("目标 Pod 临时归档完整性校验失败: %w", err)
+	}
+
+	if _, _, err := r.executor.Exec(ctx, []string{
+		"sh", "-c",
+		fmt.Sprintf("mkdir -p '%s' && tar -xf '%s' -C '%s'", r.config.Backup.StagingDir, archivePath, r.config.Backup.StagingDir),
+	}); err != nil {
+		cleanupOnError()
+		return fmt.Errorf("目标 Pod 解包临时归档失败: %w", err)
+	}
+
+	if _, _, err := r.executor.Exec(ctx, []string{
+		"sh", "-c",
+		fmt.Sprintf("rm -f '%s'", archivePath),
+	}); err != nil {
+		logger.Warn("解包成功后删除临时归档失败",
+			zap.String("archive_path", archivePath),
+			zap.Error(err),
+		)
+	} else {
+		logger.Info("解包成功后已删除临时归档", zap.String("archive_path", archivePath))
+	}
+
+	r.restoreScanDir = filepath.Join(r.config.Backup.StagingDir, "data")
+
+	statOutput, err := r.executor.ExecSimple(ctx, fmt.Sprintf("find %s -name '*.tsfile' -type f | wc -l && du -sh %s", r.restoreScanDir, r.restoreScanDir))
+	if err == nil && strings.TrimSpace(statOutput) != "" {
+		logger.Info("直连拉取完成统计", zap.String("stats", strings.TrimSpace(statOutput)))
+	}
+
+	return nil
 }
 
 // downloadAndTransfer 本地下载后传输到 Pod（新策略）
@@ -623,6 +778,23 @@ func (r *IoTDBRestorer) verifyDatabaseWriteRead(ctx context.Context) error {
 func (r *IoTDBRestorer) cleanup(ctx context.Context, backupFile string) {
 	logger.Info("步骤 5: 清理临时文件")
 
+	if r.config.Backup.UsesClusterStream() {
+		cleanupCmd := fmt.Sprintf("rm -f '%s' && rm -rf '%s'", r.clusterStreamArchivePath(), r.config.Backup.StagingDir)
+		if _, _, err := r.executor.Exec(ctx, []string{"sh", "-c", cleanupCmd}); err != nil {
+			logger.Warn("清理直连恢复临时文件失败",
+				zap.String("archive_path", r.clusterStreamArchivePath()),
+				zap.String("staging_dir", r.config.Backup.StagingDir),
+				zap.Error(err),
+			)
+		} else {
+			logger.Info("直连恢复临时文件已删除",
+				zap.String("archive_path", r.clusterStreamArchivePath()),
+				zap.String("staging_dir", r.config.Backup.StagingDir),
+			)
+		}
+		return
+	}
+
 	cleanupCmd := fmt.Sprintf("rm -f %s/%s", podBackupPath, backupFile)
 	if _, _, err := r.executor.Exec(ctx, []string{"sh", "-c", cleanupCmd}); err != nil {
 		logger.Warn("清理临时文件失败", zap.Error(err))
@@ -655,7 +827,27 @@ func (r *IoTDBRestorer) liveDataDir() string {
 }
 
 func (r *IoTDBRestorer) restoreScanRoot() string {
+	if r.restoreScanDir != "" {
+		return r.restoreScanDir
+	}
+	if r.config.Backup.UsesClusterStream() {
+		return filepath.Join(r.config.Backup.StagingDir, "data")
+	}
 	return filepath.Join(r.config.IoTDB.DataDir, strings.TrimPrefix(r.liveDataDir(), "/"))
+}
+
+func (r *IoTDBRestorer) clusterStreamArchivePath() string {
+	replacer := strings.NewReplacer("/", "_", " ", "_", ":", "_")
+	name := fmt.Sprintf(
+		"iotdb-restore-%s-%s.tar",
+		replacer.Replace(r.config.Backup.SourceNamespace),
+		replacer.Replace(r.config.Backup.SourcePodName),
+	)
+	archiveDir := r.config.Backup.ArchiveDir
+	if archiveDir == "" {
+		archiveDir = podBackupPath
+	}
+	return filepath.Join(archiveDir, name)
 }
 
 func parseFileList(output string) []string {

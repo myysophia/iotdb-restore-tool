@@ -113,6 +113,9 @@ func TestRestoreScanRootUsesNestedExtractPath(t *testing.T) {
 			IoTDB: config.IoTDBConfig{
 				DataDir: "/iotdb/data",
 			},
+			Backup: config.BackupConfig{
+				SourceType: "oss",
+			},
 		},
 	}
 
@@ -122,5 +125,39 @@ func TestRestoreScanRootUsesNestedExtractPath(t *testing.T) {
 
 	if got := restorer.restoreScanRoot(); got != "/iotdb/data/iotdb/data/datanode/data" {
 		t.Fatalf("unexpected restore scan root: %s", got)
+	}
+}
+
+func TestRestoreScanRootUsesStagingDirForClusterStream(t *testing.T) {
+	restorer := &IoTDBRestorer{
+		config: &config.Config{
+			IoTDB: config.IoTDBConfig{
+				DataDir: "/iotdb/data",
+			},
+			Backup: config.BackupConfig{
+				SourceType: "cluster_stream",
+				StagingDir: "/iotdb/data/restore_staging",
+			},
+		},
+	}
+
+	if got := restorer.restoreScanRoot(); got != "/iotdb/data/restore_staging/data" {
+		t.Fatalf("unexpected cluster stream scan root: %s", got)
+	}
+}
+
+func TestClusterStreamArchivePath(t *testing.T) {
+	restorer := &IoTDBRestorer{
+		config: &config.Config{
+			Backup: config.BackupConfig{
+				SourceNamespace: "ems-au/prod",
+				SourcePodName:   "iotdb-datanode-0:main",
+				ArchiveDir:      "/iotdb/data/restore_archive",
+			},
+		},
+	}
+
+	if got := restorer.clusterStreamArchivePath(); got != "/iotdb/data/restore_archive/iotdb-restore-ems-au_prod-iotdb-datanode-0_main.tar" {
+		t.Fatalf("unexpected cluster stream archive path: %s", got)
 	}
 }
