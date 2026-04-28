@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/vnnox/iotdb-restore-tool/pkg/logger"
@@ -37,11 +40,15 @@ func NewTransfer(clientset *kubernetes.Clientset, restConfig *rest.Config, names
 
 // getContainerName 获取容器名称（优先使用第一个容器）
 func (t *Transfer) getContainerName(ctx context.Context) (string, error) {
-	if t.container != "" {
+	return t.getContainerNameForPod(ctx, t.namespace, t.podName)
+}
+
+func (t *Transfer) getContainerNameForPod(ctx context.Context, namespace, podName string) (string, error) {
+	if namespace == t.namespace && podName == t.podName && t.container != "" {
 		return t.container, nil
 	}
 
-	pod, err := t.clientset.CoreV1().Pods(t.namespace).Get(ctx, t.podName, metav1.GetOptions{})
+	pod, err := t.clientset.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
 	if err != nil {
 		return "", fmt.Errorf("获取 Pod 信息失败: %w", err)
 	}
@@ -50,9 +57,235 @@ func (t *Transfer) getContainerName(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("Pod 中没有容器")
 	}
 
-	// 使用第一个容器
-	t.container = pod.Spec.Containers[0].Name
-	return t.container, nil
+	containerName := pod.Spec.Containers[0].Name
+	if namespace == t.namespace && podName == t.podName {
+		t.container = containerName
+	}
+	return containerName, nil
+}
+
+// CopyDirectoryAsArchiveFromPod 流式将源 Pod 中的目录打包写入目标 Pod 的归档文件。
+func (t *Transfer) CopyDirectoryAsArchiveFromPod(ctx context.Context, sourceNamespace, sourcePod, sourceBaseDir string, sourcePaths []string, targetArchivePath string) error {
+	if len(sourcePaths) == 0 {
+		return fmt.Errorf("sourcePaths 不能为空")
+	}
+
+	logger.Info("开始从源 Pod 拉取目录归档到目标 Pod",
+		zap.String("source_namespace", sourceNamespace),
+		zap.String("source_pod", sourcePod),
+		zap.String("target_namespace", t.namespace),
+		zap.String("target_pod", t.podName),
+		zap.String("source_base_dir", sourceBaseDir),
+		zap.Strings("source_paths", sourcePaths),
+		zap.String("target_archive_path", targetArchivePath),
+	)
+
+	quotedPaths := make([]string, 0, len(sourcePaths))
+	for _, item := range sourcePaths {
+		quotedPaths = append(quotedPaths, shellQuote(item))
+	}
+
+	sourceCmd := []string{
+		"sh", "-c",
+		fmt.Sprintf("cd %s && tar -cf - %s", shellQuote(sourceBaseDir), strings.Join(quotedPaths, " ")),
+	}
+	targetCmd := []string{
+		"sh", "-c",
+		fmt.Sprintf("mkdir -p %s && cat > %s", shellQuote(path.Dir(targetArchivePath)), shellQuote(targetArchivePath)),
+	}
+
+	streamCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	pipeReader, pipeWriter := io.Pipe()
+	var sourceStderr bytes.Buffer
+	var targetStderr bytes.Buffer
+	var wg sync.WaitGroup
+
+	var sourceErr error
+	var targetErr error
+
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		defer pipeWriter.Close()
+
+		sourceErr = t.execPodCommand(streamCtx, sourceNamespace, sourcePod, sourceCmd, nil, pipeWriter, &sourceStderr)
+		if sourceErr != nil {
+			_ = pipeWriter.CloseWithError(sourceErr)
+			cancel()
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		defer pipeReader.Close()
+
+		targetErr = t.execPodCommand(streamCtx, t.namespace, t.podName, targetCmd, pipeReader, nil, &targetStderr)
+		if targetErr != nil {
+			_ = pipeReader.CloseWithError(targetErr)
+			cancel()
+		}
+	}()
+
+	wg.Wait()
+
+	if sourceErr != nil {
+		return fmt.Errorf("源 Pod 打包失败: %w: %s", sourceErr, strings.TrimSpace(sourceStderr.String()))
+	}
+	if targetErr != nil {
+		return fmt.Errorf("目标 Pod 写入归档失败: %w: %s", targetErr, strings.TrimSpace(targetStderr.String()))
+	}
+
+	logger.Info("源 Pod 目录归档传输完成",
+		zap.String("source_namespace", sourceNamespace),
+		zap.String("source_pod", sourcePod),
+		zap.String("target_namespace", t.namespace),
+		zap.String("target_pod", t.podName),
+		zap.String("target_archive_path", targetArchivePath),
+	)
+
+	return nil
+}
+
+// CopyDirectoryFromPod 流式复制源 Pod 中的目录到目标 Pod 目录。
+func (t *Transfer) CopyDirectoryFromPod(ctx context.Context, sourceNamespace, sourcePod, sourceBaseDir string, sourcePaths []string, targetDir string) error {
+	if len(sourcePaths) == 0 {
+		return fmt.Errorf("sourcePaths 不能为空")
+	}
+
+	logger.Info("开始从源 Pod 拉取目录到目标 Pod",
+		zap.String("source_namespace", sourceNamespace),
+		zap.String("source_pod", sourcePod),
+		zap.String("target_namespace", t.namespace),
+		zap.String("target_pod", t.podName),
+		zap.String("source_base_dir", sourceBaseDir),
+		zap.Strings("source_paths", sourcePaths),
+		zap.String("target_dir", targetDir),
+	)
+
+	quotedPaths := make([]string, 0, len(sourcePaths))
+	for _, path := range sourcePaths {
+		quotedPaths = append(quotedPaths, shellQuote(path))
+	}
+
+	sourceCmd := []string{
+		"sh", "-c",
+		fmt.Sprintf("cd %s && tar -cf - %s", shellQuote(sourceBaseDir), strings.Join(quotedPaths, " ")),
+	}
+	targetCmd := []string{
+		"sh", "-c",
+		fmt.Sprintf("mkdir -p %s && tar -xf - -C %s", shellQuote(targetDir), shellQuote(targetDir)),
+	}
+
+	streamCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	pipeReader, pipeWriter := io.Pipe()
+	var sourceStderr bytes.Buffer
+	var targetStderr bytes.Buffer
+	var wg sync.WaitGroup
+
+	var sourceErr error
+	var targetErr error
+
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		defer pipeWriter.Close()
+
+		sourceErr = t.execPodCommand(streamCtx, sourceNamespace, sourcePod, sourceCmd, nil, pipeWriter, &sourceStderr)
+		if sourceErr != nil {
+			_ = pipeWriter.CloseWithError(sourceErr)
+			cancel()
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		defer pipeReader.Close()
+
+		targetErr = t.execPodCommand(streamCtx, t.namespace, t.podName, targetCmd, pipeReader, nil, &targetStderr)
+		if targetErr != nil {
+			_ = pipeReader.CloseWithError(targetErr)
+			cancel()
+		}
+	}()
+
+	wg.Wait()
+
+	if sourceErr != nil {
+		return fmt.Errorf("源 Pod 打包失败: %w: %s", sourceErr, strings.TrimSpace(sourceStderr.String()))
+	}
+	if targetErr != nil {
+		return fmt.Errorf("目标 Pod 解包失败: %w: %s", targetErr, strings.TrimSpace(targetStderr.String()))
+	}
+
+	logger.Info("源 Pod 目录传输完成",
+		zap.String("source_namespace", sourceNamespace),
+		zap.String("source_pod", sourcePod),
+		zap.String("target_namespace", t.namespace),
+		zap.String("target_pod", t.podName),
+	)
+
+	return nil
+}
+
+func (t *Transfer) execPodCommand(ctx context.Context, namespace, podName string, command []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	containerName, err := t.getContainerNameForPod(ctx, namespace, podName)
+	if err != nil {
+		return err
+	}
+
+	req := t.clientset.CoreV1().RESTClient().Post().
+		Resource("pods").
+		Namespace(namespace).
+		Name(podName).
+		SubResource("exec").
+		Param("container", containerName).
+		Param("command", command[0]).
+		Param("tty", "false")
+
+	for _, cmd := range command[1:] {
+		req.Param("command", cmd)
+	}
+
+	if stdin != nil {
+		req.Param("stdin", "true")
+	}
+	if stdout != nil {
+		req.Param("stdout", "true")
+	}
+	if stderr != nil {
+		req.Param("stderr", "true")
+	}
+
+	executor, err := remotecommand.NewSPDYExecutor(t.restConfig, "POST", req.URL())
+	if err != nil {
+		return fmt.Errorf("创建执行器失败: %w", err)
+	}
+
+	execCtx, cancel := context.WithTimeout(ctx, 30*time.Minute)
+	defer cancel()
+
+	err = executor.StreamWithContext(execCtx, remotecommand.StreamOptions{
+		Stdin:  stdin,
+		Stdout: stdout,
+		Stderr: stderr,
+	})
+	if err != nil && execCtx.Err() == context.DeadlineExceeded {
+		return fmt.Errorf("命令执行超时: %w", err)
+	}
+	if err != nil {
+		return fmt.Errorf("命令执行失败: %w", err)
+	}
+	return nil
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
 }
 
 // CopyFile 复制文件到 Pod
@@ -176,7 +409,7 @@ func (tr *transferReader) Read(p []byte) (int, error) {
 
 	if shouldLog && tr.totalSize > 0 {
 		elapsed := time.Since(tr.startTime).Seconds()
-		speed := float64(tr.readBytes) / elapsed / 1024 / 1024 // MB/s
+		speed := float64(tr.readBytes) / elapsed / 1024 / 1024                  // MB/s
 		remaining := float64(tr.totalSize-tr.readBytes) / (speed * 1024 * 1024) // 秒
 
 		logger.Info("传输进度",
