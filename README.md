@@ -73,9 +73,15 @@ iotdb:
   host: iotdb-datanode
 
 backup:
+  source_type: oss
   base_url: https://iotdb-backup.oss-accelerate.aliyuncs.com/ems-au
   download_dir: /tmp
   auto_detect_timestamp: true
+  source_namespace: ems-au
+  source_pod_name: iotdb-datanode-0
+  source_data_dir: /iotdb/data/datanode
+  staging_dir: /iotdb/data/restore_staging
+  archive_dir: /tmp
 
 import:
   concurrency: 1
@@ -135,25 +141,43 @@ iotdb-restore check [flags]
 
 自动检测当前小时的 35 分 01-10 秒的备份文件。
 
-### 2. 指定时间戳恢复
+### 2. 同集群直连恢复
+
+```yaml
+backup:
+  source_type: cluster_stream
+  source_namespace: ems-au
+  source_pod_name: iotdb-datanode-0
+  source_data_dir: /iotdb/data/datanode
+  staging_dir: /iotdb/data/restore_staging
+  archive_dir: /iotdb/data/restore_archive
+```
+
+```bash
+./bin/iotdb-restore restore
+```
+
+该模式会直接从源 Pod 流式拉取 `data/sequence` 和 `data/unsequence`，先在目标 Pod 的 `archive_dir` 落成临时 tar，校验完整性后再解包到 `staging_dir`，最后导入其中的 `*.tsfile`。不会恢复 `system`、`consensus`、`wal`，且会忽略 `timestamp` 参数。大数据量场景建议把 `archive_dir` 指到有充足空间的挂载盘，而不是容器 `/tmp`。
+
+### 3. 指定时间戳恢复
 
 ```bash
 ./bin/iotdb-restore restore -t 20260203083502
 ```
 
-### 3. 自定义并发数和批次大小
+### 4. 自定义并发数和批次大小
 
 ```bash
 ./bin/iotdb-restore restore -t 20260203083502 --concurrency 2 --batch-size 50
 ```
 
-### 4. 干运行（仅检查，不执行）
+### 5. 干运行（仅检查，不执行）
 
 ```bash
 ./bin/iotdb-restore restore -t 20260203083502 --dry-run
 ```
 
-### 5. 调试模式
+### 6. 调试模式
 
 ```bash
 ./bin/iotdb-restore restore -t 20260203083502 --debug
