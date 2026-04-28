@@ -26,6 +26,10 @@ iotdb:
   password: root
 
 backup:
+  # 恢复数据源类型:
+  # - oss: 现有模式，从 OSS 下载 tar.gz
+  # - cluster_stream: 同集群直连，从源 Pod 流式拉取 data/sequence 和 data/unsequence
+  source_type: oss
   # OSS 备份文件的基础 URL
   # 示例: https://iotdb-backup.oss-accelerate.aliyuncs.com/ems-au
   base_url: https://your-bucket.oss-accelerate.aliyuncs.com/your-path
@@ -35,6 +39,12 @@ backup:
   auto_detect_timestamp: true
   # 时间戳格式（Go 格式化模板）
   timestamp_pattern: "200601021504"
+  # 同集群直连恢复配置（source_type=cluster_stream 时生效）
+  source_namespace: ems-au
+  source_pod_name: iotdb-datanode-0
+  source_data_dir: /iotdb/data/datanode
+  staging_dir: /iotdb/data/restore_staging
+  archive_dir: /tmp
 
 import:
   # 并发导入线程数（根据 Pod 性能调整，建议 1-4）
