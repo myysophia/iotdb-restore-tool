@@ -2,6 +2,10 @@
 
 用 Go 语言重构的 IoTDB 数据库恢复工具，用于从 OSS 下载备份文件并恢复到 Kubernetes 集群中的 IoTDB 数据库。
 
+## 系统架构
+
+![IoTDB Restore Tool Architecture](docs/architecture.svg)
+
 ## 功能特性
 
 - ✅ 自动检测备份文件时间戳（支持秒数 01-10）
