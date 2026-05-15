@@ -65,6 +65,20 @@ notification:
     webhook_url: https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=YOUR_WEBHOOK_KEY
     # 是否启用企微通知
     enabled: true
+  phone:
+    # 电话告警配置（UCPaaS TTS 语音通知）
+    # 仅在恢复失败时触发
+    app_id: "YOUR_APP_ID"
+    app_secret: "YOUR_APP_SECRET"
+    app_key: "voice"
+    # TTS 语音角色（如 ruoxi）
+    voice: "ruoxi"
+    # 呼叫次数
+    call_num: "2"
+    # 接收告警的电话号码列表，多个号码用逗号分隔
+    phone_list: "13109632612"
+    # 是否启用电话告警
+    enabled: false
   # 环境标识（会在通知中显示）
   environment: EMS-AU
   # 是否启用通知（总开关）
