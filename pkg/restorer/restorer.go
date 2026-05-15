@@ -290,16 +290,45 @@ func (r *IoTDBRestorer) streamClusterData(ctx context.Context) error {
 		r.executor.Namespace,
 		r.executor.PodName,
 	)
-	if err := transfer.CopyDirectoryAsArchiveFromPod(
-		ctx,
-		r.config.Backup.SourceNamespace,
-		r.config.Backup.SourcePodName,
-		r.config.Backup.SourceDataDir,
-		[]string{"data/sequence", "data/unsequence"},
-		archivePath,
-	); err != nil {
+	const maxRetries = 3
+	var lastTransferErr error
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		if attempt > 1 {
+			logger.Info("重试从源 Pod 复制数据",
+				zap.Int("attempt", attempt),
+				zap.Int("max_retries", maxRetries),
+			)
+			// 清理上次失败残留的部分归档文件
+			if _, _, rmErr := r.executor.Exec(ctx, []string{
+				"sh", "-c",
+				fmt.Sprintf("rm -f '%s'", archivePath),
+			}); rmErr != nil {
+				logger.Warn("重试前清理残留归档失败",
+					zap.String("archive_path", archivePath),
+					zap.Error(rmErr),
+				)
+			}
+		}
+		lastTransferErr = transfer.CopyDirectoryAsArchiveFromPod(
+			ctx,
+			r.config.Backup.SourceNamespace,
+			r.config.Backup.SourcePodName,
+			r.config.Backup.SourceDataDir,
+			[]string{"data/sequence", "data/unsequence"},
+			archivePath,
+		)
+		if lastTransferErr == nil {
+			break
+		}
+		logger.Warn("从源 Pod 复制数据失败",
+			zap.Int("attempt", attempt),
+			zap.Int("max_retries", maxRetries),
+			zap.Error(lastTransferErr),
+		)
+	}
+	if lastTransferErr != nil {
 		cleanupOnError()
-		return fmt.Errorf("从源 Pod 复制数据失败: %w", err)
+		return fmt.Errorf("从源 Pod 复制数据失败（已重试 %d 次）: %w", maxRetries, lastTransferErr)
 	}
 
 	archiveStats, err := r.executor.ExecSimple(ctx, fmt.Sprintf("test -s '%s' && wc -c < '%s'", archivePath, archivePath))
