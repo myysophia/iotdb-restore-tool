@@ -66,6 +66,7 @@ type ImportConfig struct {
 // NotificationConfig 通知配置
 type NotificationConfig struct {
 	Wechat      WechatConfig `mapstructure:"wechat"`
+	Phone       PhoneConfig  `mapstructure:"phone"`
 	Environment string       `mapstructure:"environment"`
 	Enabled     bool         `mapstructure:"enabled"`
 }
@@ -74,6 +75,17 @@ type NotificationConfig struct {
 type WechatConfig struct {
 	WebhookURL string `mapstructure:"webhook_url"`
 	Enabled    bool   `mapstructure:"enabled"`
+}
+
+// PhoneConfig 电话告警配置（UCPaaS TTS 语音通知）
+type PhoneConfig struct {
+	AppID     string `mapstructure:"app_id"`
+	AppSecret string `mapstructure:"app_secret"`
+	AppKey    string `mapstructure:"app_key"`
+	Voice     string `mapstructure:"voice"`
+	CallNum   string `mapstructure:"call_num"`
+	PhoneList string `mapstructure:"phone_list"`
+	Enabled   bool   `mapstructure:"enabled"`
 }
 
 // LogConfig 日志配置

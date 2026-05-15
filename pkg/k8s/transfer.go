@@ -87,7 +87,7 @@ func (t *Transfer) CopyDirectoryAsArchiveFromPod(ctx context.Context, sourceName
 
 	sourceCmd := []string{
 		"sh", "-c",
-		fmt.Sprintf("cd %s && tar -cf - %s", shellQuote(sourceBaseDir), strings.Join(quotedPaths, " ")),
+		fmt.Sprintf("cd %s && tar --warning=no-file-changed --ignore-failed-read -cf - %s", shellQuote(sourceBaseDir), strings.Join(quotedPaths, " ")),
 	}
 	targetCmd := []string{
 		"sh", "-c",
@@ -131,6 +131,11 @@ func (t *Transfer) CopyDirectoryAsArchiveFromPod(ctx context.Context, sourceName
 
 	wg.Wait()
 
+	if sourceStderr.Len() > 0 {
+		logger.Warn("源 Pod 打包过程有警告（已跳过正在写入的文件）",
+			zap.String("stderr", strings.TrimSpace(sourceStderr.String())),
+		)
+	}
 	if sourceErr != nil {
 		return fmt.Errorf("源 Pod 打包失败: %w: %s", sourceErr, strings.TrimSpace(sourceStderr.String()))
 	}
@@ -172,7 +177,7 @@ func (t *Transfer) CopyDirectoryFromPod(ctx context.Context, sourceNamespace, so
 
 	sourceCmd := []string{
 		"sh", "-c",
-		fmt.Sprintf("cd %s && tar -cf - %s", shellQuote(sourceBaseDir), strings.Join(quotedPaths, " ")),
+		fmt.Sprintf("cd %s && tar --warning=no-file-changed --ignore-failed-read -cf - %s", shellQuote(sourceBaseDir), strings.Join(quotedPaths, " ")),
 	}
 	targetCmd := []string{
 		"sh", "-c",
@@ -216,6 +221,11 @@ func (t *Transfer) CopyDirectoryFromPod(ctx context.Context, sourceNamespace, so
 
 	wg.Wait()
 
+	if sourceStderr.Len() > 0 {
+		logger.Warn("源 Pod 打包过程有警告（已跳过正在写入的文件）",
+			zap.String("stderr", strings.TrimSpace(sourceStderr.String())),
+		)
+	}
 	if sourceErr != nil {
 		return fmt.Errorf("源 Pod 打包失败: %w: %s", sourceErr, strings.TrimSpace(sourceStderr.String()))
 	}

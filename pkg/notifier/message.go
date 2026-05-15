@@ -83,6 +83,11 @@ func BuildMessage(result *restorer.RestoreResult, environment string) string {
 	return message
 }
 
+// BuildPhoneMessage 构建电话告警TTS消息
+func BuildPhoneMessage(_ *restorer.RestoreResult, _ string) string {
+	return "储能澳洲，时序数据库备份失败。请确认"
+}
+
 // formatDuration 格式化时长
 func formatDuration(d time.Duration) string {
 	hours := int(d.Hours())

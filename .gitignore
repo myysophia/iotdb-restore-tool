@@ -7,7 +7,7 @@ bin/
 *.dll
 *.so
 *.dylib
-iotdb-restore
+/iotdb-restore
 *.test
 *.out
 

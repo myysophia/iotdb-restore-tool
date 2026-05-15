@@ -36,6 +36,14 @@ data:
       wechat:
         webhook_url: https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=2785e74d-e41c-475f-b8ac-a8643aa36000
         enabled: true
+      phone:
+        app_id: "10fa2925-1275-4310-a209-cc4b66144732"
+        app_secret: "novastar123"
+        app_key: "voice"
+        voice: "ruoxi"
+        call_num: "2"
+        phone_list: "13109632612,18392352065,18991814937,15810585715,18602929063"
+        enabled: true
       environment: EMS-AU
       enabled: true
 
